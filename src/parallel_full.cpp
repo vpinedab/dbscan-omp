@@ -169,7 +169,7 @@ int main(int argc, char** argv) {
     // OMP_NUM_THREADS si existe y, si no, todos los núcleos lógicos de la máquina.
 
     string nombreEntrada = "data/input/" + to_string(n) + "_data.csv"; //correr desde la carpeta donde esta el proyecto
-    string nombreSalida = "data/output/" + to_string(n) + "_results_parallel_full.csv";
+    string nombreSalida = "data/output/parallel_full/" + to_string(n) + "_results_parallel_full.csv";
 
     Punto * puntos = leer_csv(nombreEntrada, n); // Se lee TODO el archivo en un solo arreglo
 
@@ -262,8 +262,7 @@ int main(int argc, char** argv) {
 
     // NUEVO: omp_get_max_threads() regresa cuántos hilos usa OpenMP en una región paralela.
     //para saber con cuántos hilos se hizo cada corrida y para confirmar que tu 4to argumento sí se aplicó.
-    cout << "Hilos: " << omp_get_max_threads() << "\n";
-    cout << "Tiempo (solo calculo): " << (tiempo_fin - tiempo_inicio) << " s\n";
+    cout << "TIEMPO=" << (tiempo_fin - tiempo_inicio) << "\n";
 
     int resultado = guardar_csv(nombreSalida, n, puntos); // La escritura del archivo también es secuencial
 
