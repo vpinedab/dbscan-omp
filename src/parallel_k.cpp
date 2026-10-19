@@ -1,16 +1,17 @@
-
 //Notas:
 
-//Dividimos en k particiones. Los hilos se van a repartir estos bloques de manera dinamica.
-// CReamos un HALO: incluye a todos los vecinos a epsilon distancia (o menos)de un punto, sin importar que 
-//esten en otro bloque !!!
-// Todos los bloques (hilos) Escriben sobre un unico arreglo puntos usando operaciones atomicas,
+// Dividimos en k particiones. Los hilos se van a repartir estos bloques de manera dinamica.
+// Creamos un HALO: incluye a todos los vecinos a epsilon distancia (o menos)de un punto, sin importar que 
+// esten en otro bloque !!!
+// Todos los bloques (hilos) Escriben sobre un único arreglo de puntos usando operaciones atomicas,
 // cuando todos acaban el hilo principal ve esto y ya tiene el ruido. 
 
 #include <fstream>
 #include <iostream>
 #include <string>
 #include <omp.h>
+
+#include <cmath> // Librería para utilizar ceil()
 
 using namespace std;
 
@@ -136,23 +137,7 @@ double* limit_build(Punto* puntos, int n){
 
 // Divide el espacio completo en una cuadrícula de bloques
 // y asigna cada punto al bloque espacial al que pertenece
-Bloque** construir_particiones(Punto* puntos, int n, int filas, int columnas, double* limites){
-
-    // Ancho de cada bloque sobre el eje x
-    double long_part_x = (limites[1] - limites[0]) / columnas;
-
-    // Altura de cada bloque sobre el eje y
-    double long_part_y = (limites[3] - limites[2]) / filas;
-
-    // NUEVO: caso raro. Si todos los puntos tienen la misma x (o la misma y), el ancho (o la altura)
-    // sería 0 y más abajo dividiríamos entre 0. Con 1, todos los puntos caen en la columna (o fila) 0.
-    if(long_part_x == 0){
-        long_part_x = 1;
-    }
-
-    if(long_part_y == 0){
-        long_part_y = 1;
-    }
+Bloque** construir_particiones(Punto* puntos, int n, int filas, int columnas, double long_part_x, double long_part_y, double* limites){
 
     // Creamos un arreglo de punteros, uno por cada fila
     Bloque** bloques = new Bloque*[filas];
@@ -286,16 +271,23 @@ void liberar_particiones(Bloque** bloques, int filas, int columnas){
 //   1. Los puntos del propio bloque (van PRIMERO en la lista).
 //   2. El HALO: puntos que viven en OTROS bloques pero están a menos de epsilon del borde de este.
 //
-
 // Parámetros:
 //   puntos            arreglo principal de puntos (compartido por todos los hilos, aquí solo se lee)
 //   n                 cantidad total de puntos
 //   bloques           la cuadrícula de bloques
 //   fila_b, columna_b qué bloque estamos preparando
+//   filas, columnas   dimensiones de la cuadrícula
 //   margen            cuánto agrandamos el rectángulo del bloque para formar el halo (ver main)
+//   long_part_x       ancho de cada bloque
+//   long_part_y       alto de cada bloque
 //   candidatos        lista donde se guardan los índices (cada hilo pasa la SUYA, no se comparte)
+
 int reunir_candidatos(Punto* puntos, int n, Bloque** bloques,
-                      int fila_b, int columna_b, double margen, int* candidatos){
+                      int fila_b, int columna_b, 
+                      int filas, int columnas,
+                      double margen, 
+                      double long_part_x, double long_part_y,
+                      int* candidatos){
 
     // "bloque" es otro nombre para el mismo bloques[fila_b][columna_b] (una referencia: no copia nada).
     // Solo sirve para no escribir esa expresión larga cada vez.
@@ -317,24 +309,155 @@ int reunir_candidatos(Punto* puntos, int n, Bloque** bloques,
     double halo_min_y = bloque.min_y - margen;
     double halo_max_y = bloque.max_y + margen;
 
-    // Revisamos todos los puntos. Este ciclo cuesta n pasos por bloque, muy poco comparado con
-    // el conteo de vecinos, que es lo que realmente pesa.
-    for(int j = 0; j < n; j++){
+    // PASO 3: Determinar cuántas filas y columnas revisar
+    // En el caso especial de que la longitud del bloque sea menor al epsilon/margen 
+    // hay que verificar cuántos bloques más tenemos que revisar
+    int rango_columnas = ceil(margen/long_part_x);
+    int rango_filas = ceil(margen/long_part_y);
 
-        // ¿El punto j pertenece a OTRO bloque? (los del propio bloque ya se agregaron en el paso 1)
-        bool es_de_otro_bloque = (puntos[j].fila_bloque != fila_b) || (puntos[j].columna_bloque != columna_b);
+    // PASO 4: Limitar la búsqueda a los bordes de la cuadrícula
 
-        // Si es de otro bloque y cae dentro del rectángulo agrandado, forma parte del halo
-        if(es_de_otro_bloque && puntos[j].x >= halo_min_x && puntos[j].x <= halo_max_x && puntos[j].y >= halo_min_y && puntos[j].y <= halo_max_y){
-            candidatos[num_candidatos] = j;
-            num_candidatos++;
+    int columna_inicio = columna_b - rango_columnas;
+    int columna_fin = columna_b + rango_columnas;
+
+    int fila_inicio = fila_b - rango_filas;
+    int fila_fin = fila_b + rango_filas;
+
+    if(columna_inicio < 0){
+        columna_inicio = 0;
+    }
+
+    if(columna_fin >= columnas){
+        columna_fin = columnas - 1;
+    }
+
+    if(fila_inicio < 0){
+        fila_inicio = 0;
+    }
+
+    if(fila_fin >= filas){
+        fila_fin = filas - 1;
+    }
+
+    // PASO 5: Recorrer los bloques cercanos
+
+    for(int fila=fila_inicio; fila<=fila_fin; fila++){
+        for(int columna=columna_inicio; columna<=columna_fin; columna++){
+            
+            // Los del propio bloque ya se agregaron en el paso 1
+            if(fila==fila_b && columna==columna_b){
+                continue;
+            }
+
+            Bloque& vecino = bloques[fila][columna];
+
+            // Revisar únicamente los puntos que pertenecen al bloque vecino
+            for(int pos = 0; pos < vecino.cantidad; pos++){
+
+                int j = vecino.indices_ptos[pos];
+
+                // Si es de otro bloque y cae dentro del rectángulo agrandado, forma parte del halo
+                if(puntos[j].x >= halo_min_x && puntos[j].x <= halo_max_x && puntos[j].y >= halo_min_y && puntos[j].y <= halo_max_y){
+                    candidatos[num_candidatos] = j;
+                    num_candidatos++;
+                }
+            }
         }
     }
 
     return num_candidatos;
 }
 
+void detectar_ruido_parallel_k(Punto* puntos, int n, Bloque** bloques, int k, int filas, int columnas, double margen, double long_part_x, double long_part_y, double epsilon_cuadrado, int min_puntos){
+
+    #pragma omp parallel
+    {
+        // Listas PRIVADAS de cada hilo: cada hilo crea sus propios arreglos de n enteros.
+        // (Tamaño n porque, en el peor caso, todos los puntos son candidatos o vecinos.)
+        int* candidatos = new int[n];       
+        int* indices_vecinos = new int[n];  
+
+        //Aqui usamos asignación dinamica porque si un bloque casi no tiene casi puntos, va a cabar mucho antes que
+        //uno con muchos puntos. 
+        #pragma omp for schedule(dynamic)
+        for(int b = 0; b < k; b++){
+
+            // Los bloques se numeran de 0 a k-1 recorriendo la cuadrícula fila por fila.
+            // Para saber qué bloque es b: la división entera da la fila y el residuo da la columna.
+            // Ejemplo con una cuadrícula de 2 filas x 4 columnas: b = 5 -> fila 5/4 = 1, columna 5%4 = 1.
+            int fila_b = b / columnas;
+            int columna_b = b % columnas;
+
+            int cantidad_propios = bloques[fila_b][columna_b].cantidad; // Puntos que viven en este bloque
+
+            // Un bloque vacío no tiene nada que analizar (y así evitamos reunir su halo para nada).
+            // "continue" salta a la siguiente iteración del for.
+            if(cantidad_propios == 0){
+                continue;
+            }
+
+            // Reunimos los candidatos del bloque: sus puntos (primero) + su halo.
+            int num_candidatos = reunir_candidatos(puntos, n, bloques, fila_b, columna_b, filas, columnas, margen, long_part_x, long_part_y, candidatos);
+
+            // Analizamos uno por uno los puntos PROPIOS del bloque: son las primeras
+            // `cantidad_propios` posiciones de la lista de candidatos.
+            for(int pos = 0; pos < cantidad_propios; pos++){
+
+                int i = candidatos[pos]; // Índice del punto que vamos a analizar
+
+                // Copiamos sus coordenadas a variables locales: se usan miles de veces en el ciclo de abajo.
+                double xi = puntos[i].x;
+                double yi = puntos[i].y;
+
+                int num_vecinos = 0; // Se reinicia con cada punto i, igual que en el serial
+
+                // CAMBIO: en el serial (y en la versión full) j recorría los n puntos.
+                // Ahora solo recorremos los candidatos: los del bloque y su halo.
+                for(int c = 0; c < num_candidatos; c++){
+
+                    int j = candidatos[c]; // Índice real del punto candidato
+
+                    if(i != j){ // Un punto no se compara contra sí mismo
+
+                        double dx = puntos[j].x - xi;
+                        double dy = puntos[j].y - yi;
+                        double distancia_cuadrada = dx*dx + dy*dy; // Misma cuenta que en el serial
+
+                        if(distancia_cuadrada <= epsilon_cuadrado){ // ¿j es vecino de i?
+                            indices_vecinos[num_vecinos] = j; // Se guarda en la lista privada de este hilo
+                            num_vecinos++;
+                        }
+                    }
+                }
+
+                // +1 cuenta a i; si i tiene al menos min_puntos puntos en su vecindad, i es núcleo
+                if(num_vecinos + 1 >= min_puntos){
+
+                    // Se marca con la versión atómica, porque otro hilo podría estar marcando este mismo punto
+                    // (como vecino de un núcleo de otro bloque, por ejemplo).
+                    marcar_en_cluster(puntos, i);
+
+                    // Todos los vecinos de un núcleo pertenecen al cluster (aunque ellos no sean núcleo:
+                    // son puntos de borde). Un vecino puede vivir en OTRO bloque (viene del halo): aquí es
+                    // donde se UNEN los resultados de los distintos bloques, porque la marca queda en el
+                    // arreglo compartido y la verán todos.
+            
+                    for(int v = 0; v < num_vecinos; v++){
+
+                        marcar_en_cluster(puntos, indices_vecinos[v]);
+                    }
+                }
+            }
+        } // Termina el omp for: barrera. Ningún hilo sigue hasta que TODOS los bloques estén listos.
+
+        delete[] candidatos;       // Cada hilo libera sus listas privadas
+        delete[] indices_vecinos;
+    }
+}
+
 int main(int argc, char** argv) {
+/*
+//  EJECUCIÓN NORMAL
 
     // Ejemplo de ejecución:
     //
@@ -459,8 +582,23 @@ int main(int argc, char** argv) {
     // limites[2] = min_y
     // limites[3] = max_y
     double* limites = limit_build(puntos, n);
-
     
+    // Ancho de cada bloque sobre el eje x
+    double long_part_x = (limites[1] - limites[0]) / columnas;
+
+    // Altura de cada bloque sobre el eje y
+    double long_part_y = (limites[3] - limites[2]) / filas;
+
+    // NUEVO: caso raro. Si todos los puntos tienen la misma x (o la misma y), el ancho (o la altura)
+    // sería 0 y más abajo dividiríamos entre 0. Con 1, todos los puntos caen en la columna (o fila) 0.
+    if(long_part_x == 0){
+        long_part_x = 1;
+    }
+
+    if(long_part_y == 0){
+        long_part_y = 1;
+    }
+
     // Contruir bloques: construir_particiones:
 
     // 1. Divide el espacio entre min_x, max_x, min_y y max_y.
@@ -476,6 +614,8 @@ int main(int argc, char** argv) {
             n,
             filas,
             columnas,
+            long_part_x,
+            long_part_y,
             limites
         );
 
@@ -489,10 +629,10 @@ int main(int argc, char** argv) {
     // real nunca se queda fuera del halo por culpa de eso.
     // No afecta el resultado: lo peor que puede pasar es que entren al halo unos pocos puntos de más,
     // y la distancia exacta se vuelve a comprobar después, al contar vecinos.
+    
     double margen = epsilon * 1.001;
 
     //Aqui empieza lo bueno ahora si:
-
 
     // Variables COMPARTIDAS (declaradas antes de la región: todos los hilos ven las mismas).
     // Solo se LEEN, con una excepción: el campo asignacion de los puntos, que se escribe
@@ -504,91 +644,10 @@ int main(int argc, char** argv) {
     // Variables PRIVADAS (declaradas dentro de la región o del ciclo: cada hilo tiene su propia copia):
 
     //     candidatos, indices_vecinos, b, fila_b, columna_b, cantidad_propios, num_candidatos,
-    //     pos, i, xi, yi, num_vecinos, c, j, dx, dy, distancia_cuadrada, v
+    //     pos, i, xi, yi, num_vecinos, c, j, dx, dy, distancia_cuadrada, v 
 
-    #pragma omp parallel
-    {
-        // Listas PRIVADAS de cada hilo: cada hilo crea sus propios arreglos de n enteros.
-        // (Tamaño n porque, en el peor caso, todos los puntos son candidatos o vecinos.)
-        int* candidatos = new int[n];       
-        int* indices_vecinos = new int[n];  
+    detectar_ruido_parallel_k(puntos, n, bloques, k, filas, columnas, margen, long_part_x, long_part_y, epsilon_cuadrado, min_puntos);
 
-        //Aqui usamos asignación dinamica porque si un bloque casi no tiene casi puntos, va a cabar mucho antes que
-        //uno con muchos puntos. 
-        #pragma omp for schedule(dynamic)
-        for(int b = 0; b < k; b++){
-
-            // Los bloques se numeran de 0 a k-1 recorriendo la cuadrícula fila por fila.
-            // Para saber qué bloque es b: la división entera da la fila y el residuo da la columna.
-            // Ejemplo con una cuadrícula de 2 filas x 4 columnas: b = 5 -> fila 5/4 = 1, columna 5%4 = 1.
-            int fila_b = b / columnas;
-            int columna_b = b % columnas;
-
-            int cantidad_propios = bloques[fila_b][columna_b].cantidad; // Puntos que viven en este bloque
-
-            // Un bloque vacío no tiene nada que analizar (y así evitamos reunir su halo para nada).
-            // "continue" salta a la siguiente iteración del for.
-            if(cantidad_propios == 0){
-                continue;
-            }
-
-            // Reunimos los candidatos del bloque: sus puntos (primero) + su halo.
-            int num_candidatos = reunir_candidatos(puntos, n, bloques, fila_b, columna_b, margen, candidatos);
-
-            // Analizamos uno por uno los puntos PROPIOS del bloque: son las primeras
-            // `cantidad_propios` posiciones de la lista de candidatos.
-            for(int pos = 0; pos < cantidad_propios; pos++){
-
-                int i = candidatos[pos]; // Índice del punto que vamos a analizar
-
-                // Copiamos sus coordenadas a variables locales: se usan miles de veces en el ciclo de abajo.
-                double xi = puntos[i].x;
-                double yi = puntos[i].y;
-
-                int num_vecinos = 0; // Se reinicia con cada punto i, igual que en el serial
-
-                // CAMBIO: en el serial (y en la versión full) j recorría los n puntos.
-                // Ahora solo recorremos los candidatos: los del bloque y su halo.
-                for(int c = 0; c < num_candidatos; c++){
-
-                    int j = candidatos[c]; // Índice real del punto candidato
-
-                    if(i != j){ // Un punto no se compara contra sí mismo
-
-                        double dx = puntos[j].x - xi;
-                        double dy = puntos[j].y - yi;
-                        double distancia_cuadrada = dx*dx + dy*dy; // Misma cuenta que en el serial
-
-                        if(distancia_cuadrada <= epsilon_cuadrado){ // ¿j es vecino de i?
-                            indices_vecinos[num_vecinos] = j; // Se guarda en la lista privada de este hilo
-                            num_vecinos++;
-                        }
-                    }
-                }
-
-                // +1 cuenta a i; si i tiene al menos min_puntos puntos en su vecindad, i es núcleo
-                if(num_vecinos + 1 >= min_puntos){
-
-                    // Se marca con la versión atómica, porque otro hilo podría estar marcando este mismo punto
-                    // (como vecino de un núcleo de otro bloque, por ejemplo).
-                    marcar_en_cluster(puntos, i);
-
-                    // Todos los vecinos de un núcleo pertenecen al cluster (aunque ellos no sean núcleo:
-                    // son puntos de borde). Un vecino puede vivir en OTRO bloque (viene del halo): aquí es
-                    // donde se UNEN los resultados de los distintos bloques, porque la marca queda en el
-                    // arreglo compartido y la verán todos.
-            
-                    for(int v = 0; v < num_vecinos; v++){
-
-                        marcar_en_cluster(puntos, indices_vecinos[v]);
-                    }
-                }
-            }
-        } // Termina el omp for: barrera. Ningún hilo sigue hasta que TODOS los bloques estén listos.
-
-        delete[] candidatos;       // Cada hilo libera sus listas privadas
-        delete[] indices_vecinos;
-    }
 
     // Termina la región paralela. Sigue un solo hilo (el principal), que ya ve las marcas de todos los bloques.
     double tiempo_fin = omp_get_wtime();
@@ -612,5 +671,171 @@ int main(int argc, char** argv) {
     // 2. Se ejecuta en la terminal, desde la carpeta raíz del proyecto:
     //      ./src/parallel_k n epsilon min_puntos num_hilos k
     //    Ejemplo:  ./src/parallel_k 20000 0.03 10 4 8
+*/
 
+// EJECUCIÓN EXPERIMENTAL 
+
+// Ejemplo de ejecución:
+    //
+    // ./parallel_k 20000 0.03 10 4 8 10
+    //
+    // argv[0] = "./parallel_k"
+    // argv[1] = "20000"   -> número de puntos
+    // argv[2] = "0.03"    -> epsilon
+    // argv[3] = "10"      -> mínimo de puntos
+    // argv[4] = "4"       -> número de hilos
+    // argv[5] = "8"       -> número de particiones k
+    // argv[6] = "10"       -> repeticiones de la busqueda
+
+    // argc = 7
+
+    if (argc != 7) {
+        cout << "Uso: ./parallel_k n epsilon min_puntos num_hilos k num_pruebas\n";
+        return 1;
+    }
+
+    int n = stoi(argv[1]);
+    double epsilon = stod(argv[2]);
+    int min_puntos = stoi(argv[3]);
+    int num_hilos = stoi(argv[4]);
+
+    if (num_hilos < 1) {
+        cout << "num_hilos debe ser al menos 1\n";
+        return 1;
+    }
+
+    omp_set_num_threads(num_hilos);
+
+    int k = stoi(argv[5]);
+
+    // Cantidad de repeticiones de la detección de ruido para esta configuración.
+    int num_pruebas = stoi(argv[6]);
+    if(num_pruebas < 1){
+        cout << "num_pruebas debe ser al menos 1\n";
+        return 1;
+    }
+
+    int filas = 1;
+    int columnas = 1;
+
+    int p = 0;
+
+    while (filas * columnas < k) {
+
+        if (p % 2 == 0) {
+            columnas *= 2;
+        }
+        else {
+            filas *= 2;
+        }
+
+        p++;
+    }
+
+    // para k invalida
+    if (filas * columnas != k) {
+        cout << "k debe ser una potencia de 2 (1, 2, 4, 8, 16, 32, 64, ...)\n";
+        return 1;
+    }
+
+
+    // -------------------------
+    // Archivos de entrada/salida
+    // -------------------------
+
+    string nombreEntrada =
+        "data/input/" + to_string(n) + "_data.csv";
+
+    string nombreSalida =
+        "data/output/parallel_k/" +
+        to_string(n) +
+        "_results_parallel_k.csv";
+
+
+    // -------------------------
+    // Lectura de los puntos
+    // -------------------------
+
+    // Se lee todo el CSV y se guarda en un único arreglo.
+    // Este arreglo "puntos" será el arreglo principal durante todo el programa.
+    Punto* puntos = leer_csv(nombreEntrada, n);
+
+    if (puntos == nullptr) {
+        cout << "Error al leer el archivo\n";
+        return 1;
+    }
+
+    // -------------------------
+    // Particiones
+    // -------------------------
+
+    double* limites = limit_build(puntos, n);
+    
+    double long_part_x = (limites[1] - limites[0]) / columnas;
+
+    double long_part_y = (limites[3] - limites[2]) / filas;
+
+    if(long_part_x == 0){
+        long_part_x = 1;
+    }
+
+    if(long_part_y == 0){
+        long_part_y = 1;
+    }
+
+    Bloque** bloques =
+        construir_particiones(
+            puntos,
+            n,
+            filas,
+            columnas,
+            long_part_x,
+            long_part_y,
+            limites
+        );
+
+    double epsilon_cuadrado = epsilon * epsilon;
+    
+    double margen = epsilon * 1.001;
+
+    
+    // -------------------------
+    // Experimentos
+    // -------------------------
+
+    double suma_tiempos = 0;
+
+    for (int prueba=0; prueba < num_pruebas; prueba ++){
+
+        for (int i=0; i<n; i++){
+            puntos[i].asignacion = -1;
+        }
+
+        double inicio_dbscan = omp_get_wtime();
+
+        detectar_ruido_parallel_k(puntos, n, bloques, k, filas, columnas, margen, long_part_x, long_part_y, epsilon_cuadrado, min_puntos);
+
+        double fin_dbscan = omp_get_wtime();
+
+        suma_tiempos += fin_dbscan - inicio_dbscan;
+
+    }
+
+    cout << "TIEMPO=" << (suma_tiempos/num_pruebas) << "\n";
+
+    int resultado = guardar_csv(nombreSalida, n, puntos); 
+
+    liberar_particiones(bloques, filas, columnas); 
+    delete[] limites;
+    delete[] puntos;
+
+    return resultado; // 0 si todo salió bien, 1 si falló al guardar
+
+
+    // Para correr el archivo:
+    // 1. Se compila el script (¡con -fopenmp!):
+    //      g++ -O2 -std=c++17 -fopenmp src/parallel_k.cpp -o src/parallel_k
+    // 2. Se ejecuta en la terminal, desde la carpeta raíz del proyecto:
+    //      ./src/parallel_k n epsilon min_puntos num_hilos k
+    //    Ejemplo:  ./src/parallel_k 20000 0.03 10 4 8
 }
